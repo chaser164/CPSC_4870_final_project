@@ -20,9 +20,10 @@
 </head>
 <body>
 <script type="module">
-    import {ThreeEngine, z_up_set_object_position, z_up_incremental_position_object_update, z_up_set_object_rotation_from_SO3_matrix, z_up_get_object_pose_as_SO3_matrix_and_position} from "./js/utils/utils_three.js";
-    import {mul_matrix_matrix} from "./js/utils/utils_math.js";
-
+    import {ThreeEngine, z_up_set_object_position, z_up_incremental_position_object_update, z_up_set_object_rotation_from_SO3_matrix, z_up_get_object_pose_as_SO3_matrix_and_position, convert_y_up_array_to_z_up_array} from "./js/utils/utils_three.js";
+    import {mul_matrix_matrix, dot_product, mul_matrix_scalar} from "./js/utils/utils_math.js";
+    import * as THREE from 'three';
+    
     let engine = ThreeEngine.new_default_3d();
 
     const SPEED = 0.1;
@@ -41,7 +42,6 @@
         switch(event.key) {
             case " ":
                 event.preventDefault();
-                console.log("Space");
                 translation = SPEED;
                 break;
             case "ArrowUp":
@@ -84,6 +84,24 @@
         }
     });
 
+    // gets vector pointing in camera's forward direction (where lens is pointing)
+    function z_up_get_camera_forward() {
+        const EXTEND_CONSTANT = 100;
+        const forwardYUp = new THREE.Vector3();
+        engine.camera.getWorldDirection(forwardYUp);
+        return convert_y_up_array_to_z_up_array([forwardYUp.x * EXTEND_CONSTANT, forwardYUp.y * EXTEND_CONSTANT, forwardYUp.z * EXTEND_CONSTANT]);
+    }
+
+    function z_up_get_camera_position() {
+        return convert_y_up_array_to_z_up_array([engine.camera.position.x, engine.camera.position.y, engine.camera.position.z]);
+    }
+
+    function z_up_get_camera_to_object_vector(obj) {
+        let camera_position = z_up_get_camera_position();
+        let [SO3, object_position] = z_up_get_object_pose_as_SO3_matrix_and_position(obj);
+        return [object_position[0][0] - camera_position[0], object_position[1][0] - camera_position[1], object_position[2][0] - camera_position[2]];
+    }
+
     function SO3_from_yaw_pitch(yaw, pitch) {
         let yaw_matrix = [
             [Math.cos(yaw), -Math.sin(yaw), 0],
@@ -98,10 +116,27 @@
         return mul_matrix_matrix(yaw_matrix, pitch_matrix);
     }
 
+    function project_a_onto_b(a, b) {
+        return mul_matrix_scalar(b, dot_product(a, b) / dot_product(b, b));
+    }
+
+    function optimize_object_position(v1, v2) {
+        // l2 norm between v1 and projected_camera_to_object
+        let distance = Math.sqrt(Math.pow(v1[0] - v2[0], 2) + Math.pow(v1[1] - v2[1], 2) + Math.pow(v1[2] - v2[2], 2));
+        return distance;
+    }
+
     engine.animation_loop( ()  => {
 
-
         let obj = engine.mesh_objects[0];
+       
+        let cam_forward = z_up_get_camera_forward();
+        let camera_to_object = z_up_get_camera_to_object_vector(obj);
+
+        let projected_camera_to_object = project_a_onto_b(camera_to_object, cam_forward);
+
+        // console.log(optimize_object_position(camera_to_object, projected_camera_to_object));
+
         let [SO3_pose, position] = z_up_get_object_pose_as_SO3_matrix_and_position(obj);
         let SO3_rotation = SO3_from_yaw_pitch(yaw, pitch);
         let cur_pos = mul_matrix_matrix(SO3_pose, SO3_rotation)
