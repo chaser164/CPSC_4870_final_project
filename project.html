@@ -21,10 +21,13 @@
 <body>
 <script type="module">
     import {ThreeEngine, z_up_set_object_position, z_up_incremental_position_object_update, z_up_set_object_rotation_from_SO3_matrix, z_up_get_object_pose_as_SO3_matrix_and_position, convert_y_up_array_to_z_up_array} from "./js/utils/utils_three.js";
-    import {mul_matrix_matrix, dot_product, mul_matrix_scalar} from "./js/utils/utils_math.js";
+    import {mul_matrix_matrix, dot_product, mul_matrix_scalar, unroll_matrix_to_list} from "./js/utils/utils_math.js";
+    import {optimization_bfgs} from "./js/utils/utils_optimization.js";
     import * as THREE from 'three';
     
     let engine = ThreeEngine.new_default_3d();
+    // null controls so no under-the-hood orbiting / looking-at behavior happens
+    engine.controls = null;
 
     const SPEED = 0.1;
     const ROTATION_SPEED = 0.05;
@@ -120,23 +123,81 @@
         return mul_matrix_scalar(b, dot_product(a, b) / dot_product(b, b));
     }
 
-    function optimize_object_position(v1, v2) {
-        // l2 norm between v1 and projected_camera_to_object
-        let distance = Math.sqrt(Math.pow(v1[0] - v2[0], 2) + Math.pow(v1[1] - v2[1], 2) + Math.pow(v1[2] - v2[2], 2));
-        return distance;
+    function l2_squared(v1, v2) {
+        // l2 norm between v1 and projected_camera_to_object, squared
+        return Math.pow(v1[0] - v2[0], 2) + Math.pow(v1[1] - v2[1], 2) + Math.pow(v1[2] - v2[2], 2);
+    }
+
+    let camera_motion_penalty_anchor_z_up = z_up_get_camera_position();
+    const CAMERA_MOTION_PENALTY_WEIGHT = 0.8;
+
+    const CAM_DISTANCE_MIN = 3;
+    const CAM_DISTANCE_MAX = 10;
+
+    function z_up_object_position_xyz(obj) {
+        let [, object_position] = z_up_get_object_pose_as_SO3_matrix_and_position(obj);
+        return [object_position[0][0], object_position[1][0], object_position[2][0]];
+    }
+
+    function constrain_camera_distance_from_object(cam_z_up_xyz, obj) {
+        let o = z_up_object_position_xyz(obj);
+        let vx = cam_z_up_xyz[0] - o[0];
+        let vy = cam_z_up_xyz[1] - o[1];
+        let vz = cam_z_up_xyz[2] - o[2];
+        let d = Math.sqrt(vx * vx + vy * vy + vz * vz);
+        if (d < 0.0001) {
+            vx = 1;
+            vy = 0;
+            vz = 0;
+            d = 1;
+        }
+        let r = d;
+        if (r < CAM_DISTANCE_MIN) {
+            r = CAM_DISTANCE_MIN;
+        } else if (r > CAM_DISTANCE_MAX) {
+            r = CAM_DISTANCE_MAX;
+        }
+        let s = r / d;
+        return [o[0] + vx * s, o[1] + vy * s, o[2] + vz * s];
+    }
+
+    const BEHIND_CAMERA_PENALTY_WEIGHT = 10;
+
+    // cam_forward is captured once per frame before BFGS starts so the
+    // landscape stays stationary across all loss evaluations this frame.
+    function camera_position_loss(cam_z_up_xyz, cam_forward) {
+        let obj = engine.mesh_objects[0];
+        let c = constrain_camera_distance_from_object(cam_z_up_xyz, obj);
+        let o = z_up_object_position_xyz(obj);
+        let camera_to_object = [o[0] - c[0], o[1] - c[1], o[2] - c[2]];
+        let projected_camera_to_object = project_a_onto_b(camera_to_object, cam_forward);
+        let dp = dot_product(camera_to_object, cam_forward);
+        let behind_penalty = BEHIND_CAMERA_PENALTY_WEIGHT * Math.max(0, -dp);
+        let camera_motion_penalty = CAMERA_MOTION_PENALTY_WEIGHT * l2_squared(c, camera_motion_penalty_anchor_z_up);
+        return l2_squared(camera_to_object, projected_camera_to_object) + camera_motion_penalty + behind_penalty;
+    }
+
+    function bfgs_optimize_camera_position(max_iter = 80) {
+        let obj = engine.mesh_objects[0];
+        let p = z_up_get_camera_position();
+        camera_motion_penalty_anchor_z_up[0] = p[0];
+        camera_motion_penalty_anchor_z_up[1] = p[1];
+        camera_motion_penalty_anchor_z_up[2] = p[2];
+        let cam_forward = z_up_get_camera_forward();
+        let x0 = constrain_camera_distance_from_object([p[0], p[1], p[2]], obj);
+        let x_star = optimization_bfgs((x) => camera_position_loss(x, cam_forward), x0, max_iter);
+        let x_final = constrain_camera_distance_from_object(
+            [x_star[0], x_star[1], x_star[2]],
+            obj
+        );
+        z_up_set_object_position(engine.camera, x_final[0], x_final[1], x_final[2]);
+        return x_final;
     }
 
     engine.animation_loop( ()  => {
 
         let obj = engine.mesh_objects[0];
        
-        let cam_forward = z_up_get_camera_forward();
-        let camera_to_object = z_up_get_camera_to_object_vector(obj);
-
-        let projected_camera_to_object = project_a_onto_b(camera_to_object, cam_forward);
-
-        // console.log(optimize_object_position(camera_to_object, projected_camera_to_object));
-
         let [SO3_pose, position] = z_up_get_object_pose_as_SO3_matrix_and_position(obj);
         let SO3_rotation = SO3_from_yaw_pitch(yaw, pitch);
         let cur_pos = mul_matrix_matrix(SO3_pose, SO3_rotation)
@@ -147,6 +208,8 @@
         cur_pos[2][0] * translation);
 
         z_up_set_object_rotation_from_SO3_matrix(obj, cur_pos);
+
+        bfgs_optimize_camera_position();
 
     });
 
