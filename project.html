@@ -20,8 +20,8 @@
 </head>
 <body>
 <script type="module">
-    import {ThreeEngine, z_up_set_object_position, z_up_incremental_position_object_update, z_up_set_object_rotation_from_SO3_matrix, z_up_get_object_pose_as_SO3_matrix_and_position, convert_y_up_array_to_z_up_array} from "./js/utils/utils_three.js";
-    import {mul_matrix_matrix, dot_product, mul_matrix_scalar, unroll_matrix_to_list} from "./js/utils/utils_math.js";
+    import {ThreeEngine, z_up_set_object_position, z_up_incremental_position_object_update, z_up_set_object_rotation_from_SO3_matrix, z_up_get_object_pose_as_SO3_matrix_and_position, z_up_get_object_rotation_as_wxyz_quaternion, convert_y_up_array_to_z_up_array} from "./js/utils/utils_three.js";
+    import {mul_matrix_matrix, dot_product, mul_matrix_scalar, unroll_matrix_to_list, identity_matrix, add_matrix_matrix, transpose} from "./js/utils/utils_math.js";
     import {optimization_bfgs} from "./js/utils/utils_optimization.js";
     import * as THREE from 'three';
     
@@ -105,6 +105,151 @@
         return [object_position[0][0] - camera_position[0], object_position[1][0] - camera_position[1], object_position[2][0] - camera_position[2]];
     }
 
+    // quaternion log map to get axis-angle representation of rotation
+    // undoes the quaternion doubling of theta (scales by 2)
+    function z_up_get_camera_axis_angle() {
+        let q = z_up_get_object_rotation_as_wxyz_quaternion(engine.camera);
+        let w = q[0];
+        let x = q[1];
+        let y = q[2];
+        let z = q[3];
+        if (Math.acos(w) < 0.000001) {
+            return [0,0,0];
+        }
+        let scalar = 2 * (Math.acos(w) / Math.sin(Math.acos(w)));
+        return [x * scalar, y * scalar, z * scalar];
+    }
+
+    // exponential map to get SO3 matrix from axis-angle representation
+    function expo_map(u) {
+        let beta = Math.sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+        let R = [[0, -u[2], u[1]], [u[2], 0, -u[0]], [-u[1], u[0], 0]];
+        let R_sq = mul_matrix_matrix(R, R);
+    
+        let p;
+        let q;
+        if (Math.abs(beta) < 0.0001) {
+            p = 1 - beta * beta / 6 + beta * beta * beta * beta / 120;
+            q = 1/2 - beta * beta / 24 + beta * beta * beta * beta / 720;
+        } else {
+            p = Math.sin(beta) / beta;
+            q = (1 - Math.cos(beta)) / beta / beta;
+        }
+
+        let out = identity_matrix(3);
+        out = add_matrix_matrix(out, mul_matrix_scalar(R, p));
+        out = add_matrix_matrix(out, mul_matrix_scalar(R_sq, q));
+        
+        return [
+            [out[0][0], out[0][1], out[0][2]],
+            [out[1][0], out[1][1], out[1][2]],
+            [out[2][0], out[2][1], out[2][2]],
+        ];
+    }
+
+    const CAM_FORWARD_EXTEND = 100;
+
+    function cam_forward_z_up_from_rotation_so3(R) {
+        return [-R[0][2] * CAM_FORWARD_EXTEND, -R[1][2] * CAM_FORWARD_EXTEND, -R[2][2] * CAM_FORWARD_EXTEND];
+    }
+
+    // from PA 3
+    // A must be a 3x3 matrix in row major order
+    // [[a11, a12, a13], [a21, a22, a23], [a31, a32, a33]]
+    function matrix_inverse_3x3(A) {
+        let det = A[0][0] * (A[1][1] * A[2][2] - A[2][1] * A[1][2]) -
+            A[0][1] * (A[1][0] * A[2][2] - A[1][2] * A[2][0]) +
+            A[0][2] * (A[1][0] * A[2][1] - A[1][1] * A[2][0]);
+
+        if (det === 0) {
+            return null; // No inverse exists if determinant is 0
+        }
+
+        let cofactors = [
+            [
+                (A[1][1] * A[2][2] - A[2][1] * A[1][2]),
+                -(A[1][0] * A[2][2] - A[1][2] * A[2][0]),
+                (A[1][0] * A[2][1] - A[2][0] * A[1][1])
+            ],
+            [
+                -(A[0][1] * A[2][2] - A[0][2] * A[2][1]),
+                (A[0][0] * A[2][2] - A[0][2] * A[2][0]),
+                -(A[0][0] * A[2][1] - A[2][0] * A[0][1])
+            ],
+            [
+                (A[0][1] * A[1][2] - A[0][2] * A[1][1]),
+                -(A[0][0] * A[1][2] - A[1][0] * A[0][2]),
+                (A[0][0] * A[1][1] - A[1][0] * A[0][1])
+            ]
+        ];
+
+        let adjugate = [
+            [cofactors[0][0] / det, cofactors[1][0] / det, cofactors[2][0] / det],
+            [cofactors[0][1] / det, cofactors[1][1] / det, cofactors[2][1] / det],
+            [cofactors[0][2] / det, cofactors[1][2] / det, cofactors[2][2] / det]
+        ];
+
+        return adjugate;
+    }
+
+    // modified from PA 3
+    // SO(3) displacement based distance
+    function so3_displacement_distance(R1, R2) {
+
+        let R1_inv = matrix_inverse_3x3(R1);
+        let disp = mul_matrix_matrix(R1_inv, R2);
+
+        // get R disp
+        let R = [[disp[0][0], disp[0][1], disp[0][2]],
+                 [disp[1][0], disp[1][1], disp[1][2]],
+                 [disp[2][0], disp[2][1], disp[2][2]]];
+
+        // SO(3) logarithm applied to R
+        let trace = R[0][0] + R[1][1] + R[2][2];
+        let cos_beta = Math.max(-1, Math.min(1, (trace - 1) / 2));
+        let beta = Math.acos(cos_beta);
+
+        let Rt = transpose(R);
+        let R_minus_Rt = [[R[0][0]-Rt[0][0], R[0][1]-Rt[0][1], R[0][2]-Rt[0][2]],
+                          [R[1][0]-Rt[1][0], R[1][1]-Rt[1][1], R[1][2]-Rt[1][2]],
+                          [R[2][0]-Rt[2][0], R[2][1]-Rt[2][1], R[2][2]-Rt[2][2]]];
+
+        let ln_R;
+
+        const epsilon = 0.0001;
+        // beta 0 case
+        if (Math.abs(beta) < epsilon) {
+            let c = 0.5 + (beta * beta) / 12 + (7 * beta * beta * beta * beta) / 720;
+            ln_R = [[c*R_minus_Rt[0][0], c*R_minus_Rt[0][1], c*R_minus_Rt[0][2]],
+                          [c*R_minus_Rt[1][0], c*R_minus_Rt[1][1], c*R_minus_Rt[1][2]],
+                          [c*R_minus_Rt[2][0], c*R_minus_Rt[2][1], c*R_minus_Rt[2][2]]];
+        // beta pi case
+        } else if (Math.abs(beta - Math.PI) < epsilon) {
+            let s33 = Math.PI * Math.sqrt(0.5 * (R[2][2] + 1));
+            let s22 = Math.PI * Math.sqrt(0.5 * (R[1][1] + 1));
+            let s11 = Math.PI * Math.sqrt(0.5 * (R[0][0] + 1));
+            ln_R = [
+                [0, -s33, s22],
+                [s33, 0, -s11],
+                [-s22, s11, 0]
+            ];
+        } else {
+            let coeff = beta / (2 * Math.sin(beta));
+            ln_R = [[coeff*R_minus_Rt[0][0], coeff*R_minus_Rt[0][1], coeff*R_minus_Rt[0][2]],
+                    [coeff*R_minus_Rt[1][0], coeff*R_minus_Rt[1][1], coeff*R_minus_Rt[1][2]],
+                    [coeff*R_minus_Rt[2][0], coeff*R_minus_Rt[2][1], coeff*R_minus_Rt[2][2]]];
+        }
+
+        // extract a1 a2 a3 from ln(R)
+        let alpha_1 = ln_R[2][1];
+        let alpha_2 = ln_R[0][2];
+        let alpha_3 = ln_R[1][0];
+        
+        // norm of alpha 1-3, beta 1-3
+        return Math.sqrt(alpha_1*alpha_1 + alpha_2*alpha_2 + alpha_3*alpha_3);
+    }
+
+    // for flying controls
     function SO3_from_yaw_pitch(yaw, pitch) {
         let yaw_matrix = [
             [Math.cos(yaw), -Math.sin(yaw), 0],
@@ -119,17 +264,19 @@
         return mul_matrix_matrix(yaw_matrix, pitch_matrix);
     }
 
+    // for optimization expression
     function project_a_onto_b(a, b) {
         return mul_matrix_scalar(b, dot_product(a, b) / dot_product(b, b));
     }
 
     function l2_squared(v1, v2) {
-        // l2 norm between v1 and projected_camera_to_object, squared
         return Math.pow(v1[0] - v2[0], 2) + Math.pow(v1[1] - v2[1], 2) + Math.pow(v1[2] - v2[2], 2);
     }
 
     let camera_motion_penalty_anchor_z_up = z_up_get_camera_position();
+    let camera_rotation_penalty_anchor_alpha = z_up_get_camera_axis_angle();
     const CAMERA_MOTION_PENALTY_WEIGHT = 0.8;
+    const CAMERA_ROTATION_MOTION_PENALTY_WEIGHT = 0.02;
 
     const CAM_DISTANCE_MIN = 3;
     const CAM_DISTANCE_MAX = 10;
@@ -141,57 +288,82 @@
 
     function constrain_camera_distance_from_object(cam_z_up_xyz, obj) {
         let o = z_up_object_position_xyz(obj);
+        // v is vector from object to camera
         let vx = cam_z_up_xyz[0] - o[0];
         let vy = cam_z_up_xyz[1] - o[1];
         let vz = cam_z_up_xyz[2] - o[2];
-        let d = Math.sqrt(vx * vx + vy * vy + vz * vz);
-        if (d < 0.0001) {
+        let distance = Math.sqrt(vx * vx + vy * vy + vz * vz);
+        // prevent division by zero
+        if (distance < 0.00001) {
             vx = 1;
             vy = 0;
             vz = 0;
-            d = 1;
+            distance = 1;
         }
-        let r = d;
-        if (r < CAM_DISTANCE_MIN) {
-            r = CAM_DISTANCE_MIN;
-        } else if (r > CAM_DISTANCE_MAX) {
-            r = CAM_DISTANCE_MAX;
+        let constrained_distance = distance;
+        if (constrained_distance < CAM_DISTANCE_MIN) {
+            constrained_distance = CAM_DISTANCE_MIN;
+        } else if (constrained_distance > CAM_DISTANCE_MAX) {
+            constrained_distance = CAM_DISTANCE_MAX;
         }
-        let s = r / d;
+        // ensure we're constrained to the distance range,
+        // scaling out from the object to find the proper camera position
+        let s = constrained_distance / distance;
         return [o[0] + vx * s, o[1] + vy * s, o[2] + vz * s];
     }
 
     const BEHIND_CAMERA_PENALTY_WEIGHT = 10;
 
-    // cam_forward is captured once per frame before BFGS starts so the
-    // landscape stays stationary across all loss evaluations this frame.
-    function camera_position_loss(cam_z_up_xyz, cam_forward) {
+    // x is [px, py, pz, alpha1, alpha2, alpha3]
+    // such that [alpha1, alpha2, alpha3] is axis-angle representation of camera rotation
+    // and [px, py, pz] is camera position
+    function camera_pose_loss(x) {
         let obj = engine.mesh_objects[0];
-        let c = constrain_camera_distance_from_object(cam_z_up_xyz, obj);
+        let alpha = [x[3], x[4], x[5]];
+        let R_cam = expo_map(alpha);
+        let cam_forward = cam_forward_z_up_from_rotation_so3(R_cam);
+
+        // get distance from object to camera viewpoint vector
+        let c = constrain_camera_distance_from_object([x[0], x[1], x[2]], obj);
         let o = z_up_object_position_xyz(obj);
         let camera_to_object = [o[0] - c[0], o[1] - c[1], o[2] - c[2]];
         let projected_camera_to_object = project_a_onto_b(camera_to_object, cam_forward);
         let dp = dot_product(camera_to_object, cam_forward);
+        
+        // behind camera penalty
         let behind_penalty = BEHIND_CAMERA_PENALTY_WEIGHT * Math.max(0, -dp);
+        // camera motion penalty
         let camera_motion_penalty = CAMERA_MOTION_PENALTY_WEIGHT * l2_squared(c, camera_motion_penalty_anchor_z_up);
-        return l2_squared(camera_to_object, projected_camera_to_object) + camera_motion_penalty + behind_penalty;
+
+        // rotation penalty
+        let rotation_motion_penalty = CAMERA_ROTATION_MOTION_PENALTY_WEIGHT * so3_displacement_distance(R_cam, expo_map(camera_rotation_penalty_anchor_alpha));
+
+        return l2_squared(camera_to_object, projected_camera_to_object) + camera_motion_penalty + behind_penalty + rotation_motion_penalty;
     }
 
-    function bfgs_optimize_camera_position(max_iter = 80) {
+    function bfgs_optimize_camera_pose(max_iter = 80) {
         let obj = engine.mesh_objects[0];
         let p = z_up_get_camera_position();
         camera_motion_penalty_anchor_z_up[0] = p[0];
         camera_motion_penalty_anchor_z_up[1] = p[1];
         camera_motion_penalty_anchor_z_up[2] = p[2];
-        let cam_forward = z_up_get_camera_forward();
-        let x0 = constrain_camera_distance_from_object([p[0], p[1], p[2]], obj);
-        let x_star = optimization_bfgs((x) => camera_position_loss(x, cam_forward), x0, max_iter);
-        let x_final = constrain_camera_distance_from_object(
-            [x_star[0], x_star[1], x_star[2]],
-            obj
-        );
+
+        let alpha0 = z_up_get_camera_axis_angle();
+        camera_rotation_penalty_anchor_alpha[0] = alpha0[0];
+        camera_rotation_penalty_anchor_alpha[1] = alpha0[1];
+        camera_rotation_penalty_anchor_alpha[2] = alpha0[2];
+
+        let c0 = constrain_camera_distance_from_object([p[0], p[1], p[2]], obj);
+        let x0 = [c0[0], c0[1], c0[2], alpha0[0], alpha0[1], alpha0[2]];
+
+        let x_star = optimization_bfgs(camera_pose_loss, x0, max_iter);
+        let x_final = constrain_camera_distance_from_object([x_star[0], x_star[1], x_star[2]], obj);
+        let R_opt = expo_map([x_star[3], x_star[4], x_star[5]]);
+
         z_up_set_object_position(engine.camera, x_final[0], x_final[1], x_final[2]);
-        return x_final;
+        z_up_set_object_rotation_from_SO3_matrix(engine.camera, R_opt);
+
+        return x_star;
     }
 
     engine.animation_loop( ()  => {
@@ -209,8 +381,7 @@
 
         z_up_set_object_rotation_from_SO3_matrix(obj, cur_pos);
 
-        bfgs_optimize_camera_position();
-
+        bfgs_optimize_camera_pose();
     });
 
 </script>
