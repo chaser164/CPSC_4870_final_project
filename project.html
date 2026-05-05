@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>CPSC 487/587</title>
+    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/lil-gui@0.19.1/dist/lil-gui.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/10.3.0/math.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/quaternion@1.5.1/quaternion.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/numeric@1.2.6/numeric-1.2.6.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/stats.js@0.17.0/build/stats.min.js"></script>
+    <script type="importmap">
+        {
+            "imports": {
+              "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+              "three/": "https://unpkg.com/three@0.160.0/"
+            }
+        }
+    </script>
+</head>
+<body>
+<script type="module">
+    import {ThreeEngine, z_up_set_object_position, z_up_incremental_position_object_update, z_up_set_object_rotation_from_SO3_matrix, z_up_get_object_pose_as_SO3_matrix_and_position} from "./js/utils/utils_three.js";
+    import {mul_matrix_matrix} from "./js/utils/utils_math.js";
+
+    let engine = ThreeEngine.new_default_3d();
+
+    const SPEED = 0.1;
+    const ROTATION_SPEED = 0.05;
+
+    // add suzanne and level with floor
+    engine.add_suzanne_monkey_as_mesh_object(0x00eeff);
+    z_up_set_object_position(engine.mesh_objects[0], 0, 0, 1);
+
+    let translation = 0;
+    let yaw = 0;
+    let pitch = 0;
+
+    // get direction inputs
+    window.addEventListener('keydown', function(event) {
+        switch(event.key) {
+            case " ":
+                event.preventDefault();
+                console.log("Space");
+                translation = SPEED;
+                break;
+            case "ArrowUp":
+                event.preventDefault();
+                pitch = ROTATION_SPEED;
+                break;
+            case "ArrowDown":
+                event.preventDefault();
+                pitch = -ROTATION_SPEED;
+                break;
+            case "ArrowLeft":
+                event.preventDefault();
+                yaw = ROTATION_SPEED;
+                break;
+            case "ArrowRight":
+                event.preventDefault();
+                yaw = -ROTATION_SPEED;
+                break;
+        }
+    });
+
+    // reset on key up
+    window.addEventListener('keyup', function(event) {
+        switch(event.key) {
+            case " ":
+                translation = 0;
+                break;
+            case "ArrowUp":
+                pitch = 0;
+                break;
+            case "ArrowDown":
+                pitch = 0;
+                break;
+            case "ArrowLeft":
+                yaw = 0;
+                break;
+            case "ArrowRight":
+                yaw = 0;
+                break;
+        }
+    });
+
+    function SO3_from_yaw_pitch(yaw, pitch) {
+        let yaw_matrix = [
+            [Math.cos(yaw), -Math.sin(yaw), 0],
+            [Math.sin(yaw), Math.cos(yaw), 0],
+            [0, 0, 1],
+        ];
+        let pitch_matrix = [
+            [Math.cos(pitch), 0, Math.sin(pitch)],
+            [0, 1, 0],
+            [-Math.sin(pitch), 0, Math.cos(pitch)]
+        ];
+        return mul_matrix_matrix(yaw_matrix, pitch_matrix);
+    }
+
+    engine.animation_loop( ()  => {
+
+
+        let obj = engine.mesh_objects[0];
+        let [SO3_pose, position] = z_up_get_object_pose_as_SO3_matrix_and_position(obj);
+        let SO3_rotation = SO3_from_yaw_pitch(yaw, pitch);
+        let cur_pos = mul_matrix_matrix(SO3_pose, SO3_rotation)
+        // translate towards where the object is facing 
+        z_up_incremental_position_object_update(obj,
+        cur_pos[0][0] * translation,
+        cur_pos[1][0] * translation,
+        cur_pos[2][0] * translation);
+
+        z_up_set_object_rotation_from_SO3_matrix(obj, cur_pos);
+
+    });
+
+</script>
+</body>
+</html>
