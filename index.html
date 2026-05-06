@@ -269,7 +269,7 @@
         return mul_matrix_scalar(b, dot_product(a, b) / dot_product(b, b));
     }
 
-    function l2_squared(v1, v2) {
+    function l2_diff_squared(v1, v2) {
         return Math.pow(v1[0] - v2[0], 2) + Math.pow(v1[1] - v2[1], 2) + Math.pow(v1[2] - v2[2], 2);
     }
 
@@ -333,14 +333,14 @@
         // behind camera penalty
         let behind_penalty = BEHIND_CAMERA_PENALTY_WEIGHT * Math.max(0, -dp);
         // camera motion penalty
-        let camera_motion_penalty = CAMERA_MOTION_PENALTY_WEIGHT * l2_squared(c, camera_motion_penalty_anchor_z_up);
+        let camera_motion_penalty = CAMERA_MOTION_PENALTY_WEIGHT * l2_diff_squared(c, camera_motion_penalty_anchor_z_up);
         // rotation penalty
         let rotation_motion_penalty = CAMERA_ROTATION_MOTION_PENALTY_WEIGHT * so3_displacement_distance(R_cam, expo_map(camera_rotation_penalty_anchor_alpha));
         // not parallel with floor penalty
         let s = mul_matrix_matrix(R_cam, [[0], [1], [0]]);
-        let not_parallel_with_floor_penalty = NOT_PARALLEL_WITH_FLOOR_PENALTY_WEIGHT * Math.pow(l2_squared(s,[0,0,1]), 2);
+        let not_parallel_with_floor_penalty = NOT_PARALLEL_WITH_FLOOR_PENALTY_WEIGHT * Math.pow(l2_diff_squared(s,[0,0,1]), 2);
         
-        return l2_squared(camera_to_object, projected_camera_to_object) + camera_motion_penalty + behind_penalty + rotation_motion_penalty + not_parallel_with_floor_penalty;
+        return l2_diff_squared(camera_to_object, projected_camera_to_object) + camera_motion_penalty + behind_penalty + rotation_motion_penalty + not_parallel_with_floor_penalty;
     }
 
     function bfgs_optimize_camera_pose(max_iter = 80) {
