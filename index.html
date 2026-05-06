@@ -369,6 +369,9 @@
         return x_star;
     }
 
+    // initial optimization
+    bfgs_optimize_camera_pose();
+
     engine.animation_loop( ()  => {
 
         let obj = engine.mesh_objects[0];
