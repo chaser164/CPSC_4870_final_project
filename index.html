@@ -389,7 +389,9 @@
             z_up_set_object_rotation_from_SO3_matrix(obj, cur_pos);
         }
 
-        bfgs_optimize_camera_pose();
+        if (translation !== 0) {    
+            bfgs_optimize_camera_pose();
+        }
     });
 
 </script>
