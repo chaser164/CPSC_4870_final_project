@@ -26,13 +26,13 @@
     import * as THREE from 'three';
     
     let engine = ThreeEngine.new_default_3d();
-    // null controls so no under-the-hood orbiting / looking-at behavior happens
+    // null controls so no under-the-hood orbiting or looking-at behavior happens
     engine.controls = null;
 
     const SPEED = 0.1;
     const ROTATION_SPEED = 0.05;
 
-    // add suzanne and level with floor
+    // add suzanne and raise to be level with floor
     engine.add_suzanne_monkey_as_mesh_object(0x00eeff);
     z_up_set_object_position(engine.mesh_objects[0], 0, 0, 1);
 
@@ -275,9 +275,11 @@
 
     let camera_motion_penalty_anchor_z_up = z_up_get_camera_position();
     let camera_rotation_penalty_anchor_alpha = z_up_get_camera_axis_angle();
-    const CAMERA_MOTION_PENALTY_WEIGHT = 0.8;
-    const CAMERA_ROTATION_MOTION_PENALTY_WEIGHT = 0.02;
 
+    const CAMERA_MOTION_PENALTY_WEIGHT = 0.45;
+    const CAMERA_ROTATION_MOTION_PENALTY_WEIGHT = 0.05;
+    const NOT_PARALLEL_WITH_FLOOR_PENALTY_WEIGHT = 0.06;
+    const BEHIND_CAMERA_PENALTY_WEIGHT = 10;
     const CAM_DISTANCE_MIN = 3;
     const CAM_DISTANCE_MAX = 10;
 
@@ -312,8 +314,6 @@
         return [o[0] + vx * s, o[1] + vy * s, o[2] + vz * s];
     }
 
-    const BEHIND_CAMERA_PENALTY_WEIGHT = 10;
-
     // x is [px, py, pz, alpha1, alpha2, alpha3]
     // such that [alpha1, alpha2, alpha3] is axis-angle representation of camera rotation
     // and [px, py, pz] is camera position
@@ -334,15 +334,18 @@
         let behind_penalty = BEHIND_CAMERA_PENALTY_WEIGHT * Math.max(0, -dp);
         // camera motion penalty
         let camera_motion_penalty = CAMERA_MOTION_PENALTY_WEIGHT * l2_squared(c, camera_motion_penalty_anchor_z_up);
-
         // rotation penalty
         let rotation_motion_penalty = CAMERA_ROTATION_MOTION_PENALTY_WEIGHT * so3_displacement_distance(R_cam, expo_map(camera_rotation_penalty_anchor_alpha));
-
-        return l2_squared(camera_to_object, projected_camera_to_object) + camera_motion_penalty + behind_penalty + rotation_motion_penalty;
+        // not parallel with floor penalty
+        let s = mul_matrix_matrix(R_cam, [[0], [1], [0]]);
+        let not_parallel_with_floor_penalty = NOT_PARALLEL_WITH_FLOOR_PENALTY_WEIGHT * Math.pow(l2_squared(s,[0,0,1]), 2);
+        
+        return l2_squared(camera_to_object, projected_camera_to_object) + camera_motion_penalty + behind_penalty + rotation_motion_penalty + not_parallel_with_floor_penalty;
     }
 
     function bfgs_optimize_camera_pose(max_iter = 80) {
         let obj = engine.mesh_objects[0];
+        // record initial pos and orientation for movement change penalties
         let p = z_up_get_camera_position();
         camera_motion_penalty_anchor_z_up[0] = p[0];
         camera_motion_penalty_anchor_z_up[1] = p[1];
@@ -373,13 +376,18 @@
         let [SO3_pose, position] = z_up_get_object_pose_as_SO3_matrix_and_position(obj);
         let SO3_rotation = SO3_from_yaw_pitch(yaw, pitch);
         let cur_pos = mul_matrix_matrix(SO3_pose, SO3_rotation)
-        // translate towards where the object is facing 
-        z_up_incremental_position_object_update(obj,
-        cur_pos[0][0] * translation,
-        cur_pos[1][0] * translation,
-        cur_pos[2][0] * translation);
 
-        z_up_set_object_rotation_from_SO3_matrix(obj, cur_pos);
+        if (translation !== 0) {
+            // translate towards where the object is facing 
+            z_up_incremental_position_object_update(obj,
+                cur_pos[0][0] * translation,
+                cur_pos[1][0] * translation,
+                cur_pos[2][0] * translation);
+        }
+
+        if (yaw !== 0 || pitch !== 0) {
+            z_up_set_object_rotation_from_SO3_matrix(obj, cur_pos);
+        }
 
         bfgs_optimize_camera_pose();
     });
